@@ -35,11 +35,16 @@ def _make_job_dir(base_dir: str, job_id: str) -> str:
 
 
 def _upload_dir_to_s3(s3, local_dir: str, bucket: str, prefix: str):
+    """Upload all files from local_dir to S3, preserving subdirectory structure relative to local_dir"""
     prefix = prefix.lstrip("/").rstrip("/")
+    local_dir = os.path.abspath(local_dir)  # Normalize path
     for root, _, files in os.walk(local_dir):
         for fname in files:
             local_path = os.path.join(root, fname)
+            # Get relative path from local_dir root
             rel = os.path.relpath(local_path, start=local_dir)
+            # Normalize path separators for S3 (use forward slashes)
+            rel = rel.replace(os.sep, "/")
             key = f"{prefix}/{rel}".lstrip("/")
             s3.upload_file(local_path, bucket, key)
 
@@ -299,9 +304,11 @@ def sqs_worker_cli(
                 logger.info(f"[{job_id}] Uploading from MinerU output directory: {mineru_output_dir}")
 
             # Upload everything from MinerU output directory directly to output_prefix/job_id/
+            # Files will be uploaded directly under job_id/ without the {pdf_file_name}/vlm/ nesting
             out_root = f"{out_prefix.rstrip('/')}/{job_id}".strip("/")
             logger.info(f"[{job_id}] Uploading raw MinerU outputs to s3://{out_bucket}/{out_root}/")
-            _upload_dir_to_s3(s3, str(mineru_output_dir), out_bucket, out_root)
+            logger.info(f"[{job_id}] Source directory: {mineru_output_dir.absolute()}")
+            _upload_dir_to_s3(s3, str(mineru_output_dir.absolute()), out_bucket, out_root)
 
             # Delete message only on success (unless already deleted on receive)
             if receipt is not None:
