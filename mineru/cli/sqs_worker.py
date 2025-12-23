@@ -269,10 +269,39 @@ def sqs_worker_cli(
                 end_page_id=msg_end_page_id,
             )
 
-            # Upload everything in job_dir to S3 under output_prefix/job_id/
+            # Find MinerU output directory (structure: {pdf_file_name}/{parse_method}/)
+            pdf_file_name = Path(filename).stem
+            parse_method_dir = "vlm" if msg_backend.startswith("vlm-") else msg_parse_method
+            mineru_output_dir = Path(job_dir) / pdf_file_name / parse_method_dir
+            
+            # Fallback: try to find any output directory if the expected one doesn't exist
+            if not mineru_output_dir.exists():
+                # Try alternative paths
+                alt_paths = [
+                    Path(job_dir) / pdf_file_name / msg_parse_method,
+                    Path(job_dir) / pdf_file_name,
+                ]
+                for alt_path in alt_paths:
+                    if alt_path.exists():
+                        mineru_output_dir = alt_path
+                        break
+                else:
+                    # If still not found, search for any subdirectory with .md files
+                    md_files = list(Path(job_dir).rglob("*.md"))
+                    if md_files:
+                        mineru_output_dir = md_files[0].parent
+                        logger.info(f"[{job_id}] Found MinerU output at: {mineru_output_dir}")
+            
+            if not mineru_output_dir.exists():
+                logger.warning(f"[{job_id}] MinerU output directory not found, uploading from job_dir")
+                mineru_output_dir = Path(job_dir)
+            else:
+                logger.info(f"[{job_id}] Uploading from MinerU output directory: {mineru_output_dir}")
+
+            # Upload everything from MinerU output directory directly to output_prefix/job_id/
             out_root = f"{out_prefix.rstrip('/')}/{job_id}".strip("/")
             logger.info(f"[{job_id}] Uploading raw MinerU outputs to s3://{out_bucket}/{out_root}/")
-            _upload_dir_to_s3(s3, job_dir, out_bucket, out_root)
+            _upload_dir_to_s3(s3, str(mineru_output_dir), out_bucket, out_root)
 
             # Delete message only on success (unless already deleted on receive)
             if receipt is not None:
