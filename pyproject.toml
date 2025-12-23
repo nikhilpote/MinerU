@@ -116,6 +116,7 @@ mineru-openai-server = "mineru.cli.vlm_server:openai_server"
 mineru-models-download = "mineru.cli.models_download:download_models"
 mineru-api = "mineru.cli.fast_api:main"
 mineru-gradio = "mineru.cli.gradio_app:main"
+mineru-sqs-worker = "mineru.cli.sqs_worker:sqs_worker_cli"
 
 [tool.setuptools.dynamic]
 version = { attr = "mineru.version.__version__" }
