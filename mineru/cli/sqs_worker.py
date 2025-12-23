@@ -29,6 +29,12 @@ except ImportError:
     except ImportError:
         pass
 
+try:
+    from bs4 import BeautifulSoup
+    BEAUTIFULSOUP_AVAILABLE = True
+except ImportError:
+    BEAUTIFULSOUP_AVAILABLE = False
+
 from loguru import logger
 from mineru.cli.common import aio_do_parse, read_fn
 
@@ -82,17 +88,32 @@ def _replace_images_with_base64(markdown_text: str, image_dir: str) -> str:
         if relative_path.startswith('data:'):
             return match.group(0)
         
-        # Try to find the image file
-        full_path = os.path.join(image_dir, relative_path)
-        if not os.path.exists(full_path):
-            # Try with different extensions
+        # Try multiple path resolution strategies
+        possible_paths = [
+            os.path.join(image_dir, relative_path),  # Direct path
+            os.path.join(image_dir, os.path.basename(relative_path)),  # Just filename
+            relative_path,  # Absolute or relative to current dir
+        ]
+        
+        full_path = None
+        for path in possible_paths:
+            if os.path.exists(path) and os.path.isfile(path):
+                full_path = path
+                break
+        
+        # If not found, try with different extensions
+        if not full_path:
+            base_name = os.path.splitext(relative_path)[0]
             for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-                alt_path = full_path.rsplit('.', 1)[0] + ext
-                if os.path.exists(alt_path):
-                    full_path = alt_path
+                for base_dir in [image_dir, os.path.dirname(relative_path) if relative_path else '.']:
+                    test_path = os.path.join(base_dir, base_name + ext)
+                    if os.path.exists(test_path) and os.path.isfile(test_path):
+                        full_path = test_path
+                        break
+                if full_path:
                     break
         
-        if os.path.exists(full_path):
+        if full_path and os.path.exists(full_path):
             # Determine MIME type from extension
             ext = os.path.splitext(full_path)[1].lower()
             mime_types = {
@@ -106,7 +127,12 @@ def _replace_images_with_base64(markdown_text: str, image_dir: str) -> str:
             
             base64_image = _image_to_base64(full_path)
             if base64_image:
+                logger.debug(f"Converted image to base64: {full_path}")
                 return f'![{alt_text}](data:{mime_type};base64,{base64_image})'
+            else:
+                logger.warning(f"Failed to convert image to base64: {full_path}")
+        else:
+            logger.warning(f"Image not found: {relative_path} (searched in {image_dir})")
         
         # Return original if image not found
         return match.group(0)
@@ -116,6 +142,7 @@ def _replace_images_with_base64(markdown_text: str, image_dir: str) -> str:
 
 def _markdown_to_html(markdown_text: str) -> str:
     """Convert markdown text to HTML"""
+    
     if not MARKDOWN_AVAILABLE:
         logger.warning("markdown library not available, using basic HTML conversion")
         # Very basic fallback - just escape HTML and preserve line breaks
@@ -137,6 +164,9 @@ def _markdown_to_html(markdown_text: str) -> str:
         else:
             # Fallback
             html = markdown_text.replace('\n', '<br>\n')
+        
+        # Post-process HTML to fix images, math, and add block tagging
+        html = _post_process_html(html)
         return html
     except Exception as e:
         logger.warning(f"Failed to convert markdown to HTML: {e}, using fallback")
@@ -144,8 +174,94 @@ def _markdown_to_html(markdown_text: str) -> str:
         return html
 
 
+def _post_process_html(html: str) -> str:
+    """Post-process HTML to fix images, math, and add block tagging similar to Marker"""
+    if not BEAUTIFULSOUP_AVAILABLE:
+        return html
+    
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        block_counter = 0
+        
+        # Process images - ensure base64 data URIs are properly handled
+        for img in soup.find_all('img'):
+            src = img.get('src', '')
+            if src.startswith('data:'):
+                # Image is already base64, wrap in figure tag with data-block-id
+                block_counter += 1
+                block_id = f"image-{block_counter}"
+                
+                # Create figure wrapper
+                figure = soup.new_tag('figure')
+                figure['data-block-id'] = block_id
+                figure['class'] = ['highlight-block']
+                
+                # Move img into figure
+                img.extract()
+                figure.append(img)
+                
+                # Insert figure where img was
+                if img.parent:
+                    img.parent.insert(img.parent.contents.index(img) if img in img.parent.contents else 0, figure)
+                else:
+                    # If no parent, wrap the img
+                    img.wrap(figure)
+            else:
+                # Regular image, also wrap in figure
+                block_counter += 1
+                block_id = f"image-{block_counter}"
+                figure = soup.new_tag('figure')
+                figure['data-block-id'] = block_id
+                figure['class'] = ['highlight-block']
+                img.wrap(figure)
+        
+        # Add block IDs and highlight classes to other elements
+        # Process paragraphs
+        for p in soup.find_all('p'):
+            if not p.get('data-block-id'):
+                block_counter += 1
+                p['data-block-id'] = f"block-{block_counter}"
+                if 'highlight-block' not in p.get('class', []):
+                    if p.get('class'):
+                        p['class'].append('highlight-block')
+                    else:
+                        p['class'] = ['highlight-block']
+        
+        # Process tables
+        for table in soup.find_all('table'):
+            if not table.get('data-block-id'):
+                block_counter += 1
+                table['data-block-id'] = f"table-{block_counter}"
+                wrapper = soup.new_tag('div')
+                wrapper['class'] = ['highlight-block', 'highlight-table']
+                wrapper['data-block-id'] = f"table-{block_counter}"
+                table.wrap(wrapper)
+        
+        # Process headings
+        for heading in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+            if not heading.get('data-block-id'):
+                block_counter += 1
+                heading['data-block-id'] = f"heading-{block_counter}"
+                if 'highlight-block' not in heading.get('class', []):
+                    if heading.get('class'):
+                        heading['class'].append('highlight-block')
+                    else:
+                        heading['class'] = ['highlight-block']
+        
+        # Process list items
+        for li in soup.find_all('li'):
+            if not li.get('data-block-id'):
+                block_counter += 1
+                li['data-block-id'] = f"list-item-{block_counter}"
+        
+        return str(soup)
+    except Exception as e:
+        logger.warning(f"Failed to post-process HTML: {e}")
+        return html
+
+
 def _wrap_html(body: str) -> str:
-    """Wrap HTML body in a complete HTML document with styling"""
+    """Wrap HTML body in a complete HTML document with styling similar to Marker"""
     return "\n".join([
         "<!DOCTYPE html>",
         "<html>",
@@ -157,6 +273,7 @@ def _wrap_html(body: str) -> str:
         "        .content { background: white; padding: 24px 32px; margin-bottom: 48px; box-shadow: 0 2px 6px rgba(0,0,0,0.12); }",
         "        img { max-width: 100%; height: auto; border: 1px solid #eee; border-radius: 4px; background: #fafafa; margin: 16px 0; }",
         "        figure { margin: 24px auto; text-align: center; }",
+        "        figure img { max-width: 100%; height: auto; border: 1px solid #eee; border-radius: 4px; background: #fafafa; }",
         "        code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: 'Courier New', monospace; }",
         "        pre { background: #f4f4f4; padding: 16px; border-radius: 4px; overflow-x: auto; }",
         "        table { border-collapse: collapse; width: 100%; margin: 16px 0; }",
@@ -165,7 +282,54 @@ def _wrap_html(body: str) -> str:
         "        h1, h2, h3, h4, h5, h6 { margin-top: 24px; margin-bottom: 16px; }",
         "        p { margin: 12px 0; }",
         "        blockquote { border-left: 4px solid #ddd; padding-left: 16px; margin: 16px 0; color: #666; }",
+        "        .highlight-block {",
+        "            background: rgba(255, 235, 59, 0.35);",
+        "            padding: 6px 8px;",
+        "            border-radius: 6px;",
+        "            margin: 6px 0;",
+        "            box-shadow: inset 0 0 0 1px rgba(0,0,0,0.05);",
+        "            cursor: pointer;",
+        "        }",
+        "        .highlight-block:hover {",
+        "            background: rgba(255, 235, 59, 0.5);",
+        "        }",
+        "        .highlight-block figure {",
+        "            background: white;",
+        "        }",
+        "        .highlight-table {",
+        "            background: rgba(59, 130, 246, 0.2);",
+        "            border: 1px solid rgba(59, 130, 246, 0.35);",
+        "        }",
+        "        [data-block-id] {",
+        "            position: relative;",
+        "        }",
         "    </style>",
+        "    <script src='https://polyfill.io/v3/polyfill.min.js?features=es6'></script>",
+        "    <script id='MathJax-script' async src='https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js'></script>",
+        "    <script>",
+        "        window.MathJax = {",
+        "            tex: {",
+        "                inlineMath: [['\\\\(', '\\\\)']],",
+        "                displayMath: [['\\\\[', '\\\\]']],",
+        "                processEscapes: true,",
+        "                processEnvironments: true",
+        "            },",
+        "            options: {",
+        "                ignoreHtmlClass: '.*',",
+        "                processHtmlClass: 'arithmatex'",
+        "            }",
+        "        };",
+        "        // Enable block tagging functionality",
+        "        document.addEventListener('DOMContentLoaded', function() {",
+        "            document.querySelectorAll('[data-block-id]').forEach(function(block) {",
+        "                block.addEventListener('click', function() {",
+        "                    const blockId = this.getAttribute('data-block-id');",
+        "                    console.log('Block ID:', blockId);",
+        "                    // You can add custom tagging logic here",
+        "                });",
+        "            });",
+        "        });",
+        "    </script>",
         "</head>",
         "<body>",
         '    <div class="content">',
@@ -295,13 +459,13 @@ async def _process_pdf_async(
     "--formula-enable/--no-formula-enable",
     default=True,
     show_default=True,
-    help="Enable formula parsing",
+    help="Enable inline formula recognition. If disabled, inline formulas will not be detected or parsed.",
 )
 @click.option(
     "--table-enable/--no-table-enable",
     default=True,
     show_default=True,
-    help="Enable table parsing",
+    help="Enable table recognition. If disabled, tables will be shown as images.",
 )
 @click.option(
     "--server-url",
@@ -353,8 +517,8 @@ def sqs_worker_cli(
     - backend: MinerU backend to use
     - parse_method: Parse method (auto, txt, ocr)
     - lang: Language code
-    - formula_enable: Enable formula parsing (true/false)
-    - table_enable: Enable table parsing (true/false)
+    - formula_enable: Enable inline formula recognition (true/false). If false, formulas won't be detected/parsed.
+    - table_enable: Enable table recognition (true/false). If false, tables will be shown as images.
     - server_url: Server URL for vlm-http-client backend
     - start_page_id: Starting page ID
     - end_page_id: Ending page ID
@@ -446,7 +610,26 @@ def sqs_worker_cli(
             index_html_path = Path(job_dir) / "index.html"
             if md_path.exists():
                 logger.info(f"[{job_id}] Rendering markdown to HTML...")
-                image_dir = md_path.parent / "images" if (md_path.parent / "images").exists() else md_path.parent
+                # Try multiple possible image directory locations
+                possible_image_dirs = [
+                    md_path.parent / "images",  # Standard location
+                    md_path.parent.parent / "images",  # One level up
+                    Path(job_dir) / pdf_file_name / "images",  # At pdf_file_name level
+                    Path(job_dir) / "images",  # At job level
+                ]
+                
+                image_dir = None
+                for img_dir in possible_image_dirs:
+                    if img_dir.exists() and img_dir.is_dir():
+                        image_dir = img_dir
+                        logger.info(f"[{job_id}] Found images directory: {image_dir}")
+                        break
+                
+                if not image_dir:
+                    # Fallback to markdown directory
+                    image_dir = md_path.parent
+                    logger.warning(f"[{job_id}] Images directory not found, using markdown directory: {image_dir}")
+                
                 render_markdown_to_html(md_path, index_html_path, image_dir)
                 logger.info(f"[{job_id}] HTML rendered to {index_html_path}")
             else:
