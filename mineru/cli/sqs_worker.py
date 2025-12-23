@@ -141,7 +141,7 @@ def _replace_images_with_base64(markdown_text: str, image_dir: str) -> str:
 
 
 def _markdown_to_html(markdown_text: str) -> str:
-    """Convert markdown text to HTML"""
+    """Convert markdown text to HTML, preserving LaTeX math"""
     
     if not MARKDOWN_AVAILABLE:
         logger.warning("markdown library not available, using basic HTML conversion")
@@ -151,21 +151,47 @@ def _markdown_to_html(markdown_text: str) -> str:
         return html
     
     try:
-        # Try using markdown library
+        # Protect LaTeX math before markdown conversion to prevent backslash stripping
+        latex_blocks = []
+        latex_inline = []
+        
+        # Protect block math \[...\] (can be multi-line)
+        def protect_block_math(match):
+            idx = len(latex_blocks)
+            latex_blocks.append(match.group(0))
+            return f"__LATEX_BLOCK_{idx}__"
+        
+        # Protect inline math \(...\)
+        def protect_inline_math(match):
+            idx = len(latex_inline)
+            latex_inline.append(match.group(0))
+            return f"__LATEX_INLINE_{idx}__"
+        
+        # Protect LaTeX before markdown processing
+        protected_text = re.sub(r'\\\[[\s\S]*?\\\]', protect_block_math, markdown_text)
+        protected_text = re.sub(r'\\\([^\\)]*?\\\)', protect_inline_math, protected_text)
+        
+        # Convert markdown to HTML
         if hasattr(markdown, 'markdown'):
             # Standard markdown library
             html = markdown.markdown(
-                markdown_text,
+                protected_text,
                 extensions=['tables', 'fenced_code', 'codehilite']
             )
         elif hasattr(markdown, 'convert'):
             # markdown2 library
-            html = markdown.convert(markdown_text, extras=['tables', 'fenced-code-blocks'])
+            html = markdown.convert(protected_text, extras=['tables', 'fenced-code-blocks'])
         else:
             # Fallback
-            html = markdown_text.replace('\n', '<br>\n')
+            html = protected_text.replace('\n', '<br>\n')
         
-        # Post-process HTML to fix images, math, and add block tagging
+        # Restore LaTeX math (preserves all backslashes)
+        for idx, latex in enumerate(latex_blocks):
+            html = html.replace(f"__LATEX_BLOCK_{idx}__", latex)
+        for idx, latex in enumerate(latex_inline):
+            html = html.replace(f"__LATEX_INLINE_{idx}__", latex)
+        
+        # Post-process HTML to fix images and add block tagging
         html = _post_process_html(html)
         return html
     except Exception as e:
